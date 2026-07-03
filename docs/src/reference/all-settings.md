@@ -858,6 +858,38 @@ List of `string` values
 }
 ```
 
+## Reduce Motion
+
+- Description: Whether to reduce non-essential motion in the UI, such as loading spinners and pulsating labels, by rendering them in a static state.
+- Setting: `reduce_motion`
+- Default: `system`
+
+**Options**
+
+1. Follow the operating system's reduced motion preference (currently behaves as `off` until OS detection lands):
+
+```json [settings]
+{
+  "reduce_motion": "system"
+}
+```
+
+2. Always reduce motion:
+
+```json [settings]
+{
+  "reduce_motion": "on"
+}
+```
+
+3. Never reduce motion:
+
+```json [settings]
+{
+  "reduce_motion": "off"
+}
+```
+
 ## Snippet Sort Order
 
 - Description: Determines how snippets are sorted relative to other completion items.
@@ -3279,7 +3311,7 @@ Examples:
 
 - Description:
   Preview tabs allow you to open files in preview mode, where they close automatically when you switch to another file unless you explicitly pin them. This is useful for quickly viewing files without cluttering your workspace. Preview tabs display their file names in italics. \
-   There are several ways to convert a preview tab into a regular tab:
+  There are several ways to convert a preview tab into a regular tab:
 
   - Double-clicking on the file
   - Double-clicking on the tab header

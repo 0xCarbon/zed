@@ -411,6 +411,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
     .detach();
 
     init_cursor_hide_mode(cx);
+    init_reduce_motion(cx);
 
     cx.observe_new(|_multi_workspace: &mut MultiWorkspace, window, cx| {
         let Some(window) = window else {
@@ -1976,6 +1977,29 @@ impl Settings for CursorHideModeSetting {
 
 fn init_cursor_hide_mode(cx: &mut App) {
     let apply = |cx: &mut App| cx.set_cursor_hide_mode(CursorHideModeSetting::get_global(cx).0);
+    apply(cx);
+    cx.observe_global::<SettingsStore>(apply).detach();
+}
+
+#[derive(Copy, Clone, Debug, settings::RegisterSetting)]
+struct ReduceMotionSetting(settings::ReduceMotionMode);
+
+impl Settings for ReduceMotionSetting {
+    fn from_settings(content: &settings::SettingsContent) -> Self {
+        Self(content.reduce_motion.unwrap_or_default())
+    }
+}
+
+fn init_reduce_motion(cx: &mut App) {
+    let apply = |cx: &mut App| {
+        let reduce_motion = match ReduceMotionSetting::get_global(cx).0 {
+            settings::ReduceMotionMode::On => true,
+            // GPUI has no OS reduced-motion detection yet, so `System` behaves
+            // as `Off` until that lands.
+            settings::ReduceMotionMode::System | settings::ReduceMotionMode::Off => false,
+        };
+        cx.set_reduce_motion(reduce_motion);
+    };
     apply(cx);
     cx.observe_global::<SettingsStore>(apply).detach();
 }
