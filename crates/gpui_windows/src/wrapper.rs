@@ -52,9 +52,11 @@ impl Deref for SafeHwnd {
     }
 }
 
-/// A window handle that is guaranteed to be non-null. Stores a `NonZeroIsize`,
-/// so it is `Send + Sync` for the same reason `SafeHwnd` opts in explicitly:
-/// an HWND is a process-global identifier.
+/// A window handle that is guaranteed to be non-null. Because it wraps a
+/// `NonZeroIsize`, it is automatically `Send + Sync` with no `unsafe impl`
+/// needed (unlike `SafeHwnd`, which opts in explicitly). The HWND it carries is
+/// a process-wide handle that is safe to move and share between threads, which
+/// is the same rationale `SafeHwnd` documents for its explicit opt-in.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct NonNullHwnd(NonZeroIsize);
 
