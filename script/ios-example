@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+
+# Builds the hello_ios GPUI example, packages it as an .app bundle, and runs it
+# in the iOS simulator.
+#
+# Usage: script/ios-example [--release]
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+TARGET=aarch64-apple-ios-sim
+EXAMPLE_DIR=crates/gpui_ios/examples/hello_ios
+APP_NAME=HelloIos
+BUNDLE_ID=dev.zed.gpui.HelloIos
+
+PROFILE=debug
+CARGO_PROFILE_FLAG=""
+if [[ "${1:-}" == "--release" ]]; then
+    PROFILE=release
+    CARGO_PROFILE_FLAG="--release"
+fi
+
+if ! rustup target list --installed | grep -q "$TARGET"; then
+    echo "Installing Rust target $TARGET..."
+    rustup target add "$TARGET"
+fi
+
+echo "Building hello_ios for $TARGET ($PROFILE)..."
+(cd "$EXAMPLE_DIR" && cargo build --target "$TARGET" $CARGO_PROFILE_FLAG)
+
+BINARY="$EXAMPLE_DIR/target/$TARGET/$PROFILE/hello_ios"
+APP_DIR="$EXAMPLE_DIR/target/$APP_NAME.app"
+
+echo "Assembling $APP_DIR..."
+rm -rf "$APP_DIR"
+mkdir -p "$APP_DIR"
+cp "$BINARY" "$APP_DIR/$APP_NAME"
+
+cat > "$APP_DIR/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>$APP_NAME</string>
+    <key>CFBundleIdentifier</key>
+    <string>$BUNDLE_ID</string>
+    <key>CFBundleName</key>
+    <string>$APP_NAME</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>MinimumOSVersion</key>
+    <string>13.0</string>
+    <key>DTPlatformName</key>
+    <string>iphonesimulator</string>
+    <key>UIDeviceFamily</key>
+    <array>
+        <integer>1</integer>
+        <integer>2</integer>
+    </array>
+    <key>UILaunchScreen</key>
+    <dict/>
+</dict>
+</plist>
+PLIST
+
+codesign --force --sign - "$APP_DIR" >/dev/null
+
+BOOTED_DEVICE=$(xcrun simctl list devices booted | grep -m1 -oE '[0-9A-F-]{36}' || true)
+if [[ -z "$BOOTED_DEVICE" ]]; then
+    BOOTED_DEVICE=$(xcrun simctl list devices available | grep -m1 -oE 'iPhone[^(]*\(([0-9A-F-]{36})\)' | grep -oE '[0-9A-F-]{36}' || true)
+    if [[ -z "$BOOTED_DEVICE" ]]; then
+        echo "No available iPhone simulator found. Install one via Xcode." >&2
+        exit 1
+    fi
+    echo "Booting simulator $BOOTED_DEVICE..."
+    xcrun simctl boot "$BOOTED_DEVICE"
+fi
+
+open -a Simulator
+
+echo "Installing $APP_NAME..."
+xcrun simctl install "$BOOTED_DEVICE" "$APP_DIR"
+
+echo "Launching $BUNDLE_ID (logs follow, ctrl-c to stop)..."
+xcrun simctl launch --console-pty --terminate-running-process "$BOOTED_DEVICE" "$BUNDLE_ID"
