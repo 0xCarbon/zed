@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, anyhow};
 use futures::channel::oneshot::{self, Receiver};
 use gpui_util::ResultExt;
 use raw_window_handle as rwh;
@@ -1357,11 +1357,10 @@ unsafe extern "system" fn window_procedure(
         let window_params = unsafe { &*(lparam.0 as *const CREATESTRUCTW) };
         let window_creation_context = window_params.lpCreateParams as *mut WindowCreateContext;
         let window_creation_context = unsafe { &mut *window_creation_context };
-        let non_null_hwnd = unsafe {
-            // SAFETY: WM_NCCREATE is received through WNDPROC, whose hwnd parameter is
-            // documented as "A handle to the window".
-            // https://learn.microsoft.com/en-us/windows/win32/api/winuser/nc-winuser-wndproc#parameters
-            NonNullHwnd::new_unchecked(hwnd)
+        let Some(non_null_hwnd) = NonNullHwnd::new(hwnd) else {
+            window_creation_context.inner =
+                Some(Err(anyhow!("WM_NCCREATE received a null window handle")));
+            return LRESULT(0);
         };
         return match WindowsWindowInner::new(window_creation_context, non_null_hwnd, window_params)
         {

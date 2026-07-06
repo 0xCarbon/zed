@@ -52,19 +52,15 @@ impl Deref for SafeHwnd {
     }
 }
 
+/// A window handle that is guaranteed to be non-null. Stores a `NonZeroIsize`,
+/// so it is `Send + Sync` for the same reason `SafeHwnd` opts in explicitly:
+/// an HWND is a process-global identifier.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct NonNullHwnd(NonZeroIsize);
 
 impl NonNullHwnd {
     pub(crate) fn new(raw: HWND) -> Option<Self> {
         NonZeroIsize::new(raw.0 as isize).map(Self)
-    }
-
-    /// # Safety
-    ///
-    /// `raw` must be a non-null window handle.
-    pub(crate) unsafe fn new_unchecked(raw: HWND) -> Self {
-        Self(unsafe { NonZeroIsize::new_unchecked(raw.0 as isize) })
     }
 
     pub(crate) fn hwnd(self) -> HWND {
