@@ -84,7 +84,7 @@ impl Deref for ModifiersChangedEvent {
 
 /// The phase of a touch motion event.
 /// Based on the winit enum of the same name.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum TouchPhase {
     /// The touch started.
     Started,
@@ -93,6 +93,41 @@ pub enum TouchPhase {
     Moved,
     /// The touch phase has ended
     Ended,
+    /// The system cancelled the touch, e.g. because a system gesture or
+    /// incoming call took it over. Handlers should abandon any interaction
+    /// in progress rather than completing it.
+    Cancelled,
+}
+
+/// Identifies a single touch from the moment it begins until it ends or is
+/// cancelled. Ids are not reused while the touch is active, but may be reused
+/// by later touches.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub struct TouchId(pub u64);
+
+/// A touch event from the platform, describing one touch's transition through
+/// [`TouchPhase`]s. Touches are delivered to the elements hit by the touch's
+/// starting position: every event for a given [`TouchId`] is dispatched to the
+/// elements under its `Started` position, even after the touch moves outside
+/// of them.
+#[derive(Clone, Debug)]
+pub struct TouchEvent {
+    /// The touch this event belongs to.
+    pub id: TouchId,
+    /// The lifecycle phase of the touch.
+    pub phase: TouchPhase,
+    /// The position of the touch in window coordinates.
+    pub position: Point<Pixels>,
+    /// The normalized pressure of the touch from 0 to 1, on hardware that
+    /// senses it.
+    pub force: Option<f32>,
+}
+
+impl Sealed for TouchEvent {}
+impl InputEvent for TouchEvent {
+    fn to_platform_input(self) -> PlatformInput {
+        PlatformInput::Touch(self)
+    }
 }
 
 /// A mouse down event from the platform
@@ -670,6 +705,8 @@ pub enum PlatformInput {
     Pinch(PinchEvent),
     /// Files were dragged and dropped onto the window.
     FileDrop(FileDropEvent),
+    /// A touch changed phase on a touch screen.
+    Touch(TouchEvent),
 }
 
 impl PlatformInput {
@@ -686,6 +723,7 @@ impl PlatformInput {
             PlatformInput::ScrollWheel(event) => Some(event),
             PlatformInput::Pinch(event) => Some(event),
             PlatformInput::FileDrop(event) => Some(event),
+            PlatformInput::Touch(_) => None,
         }
     }
 
@@ -702,6 +740,14 @@ impl PlatformInput {
             PlatformInput::ScrollWheel(_) => None,
             PlatformInput::Pinch(_) => None,
             PlatformInput::FileDrop(_) => None,
+            PlatformInput::Touch(_) => None,
+        }
+    }
+
+    pub(crate) fn touch_event(&self) -> Option<&TouchEvent> {
+        match self {
+            PlatformInput::Touch(event) => Some(event),
+            _ => None,
         }
     }
 }

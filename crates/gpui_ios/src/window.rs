@@ -4,32 +4,40 @@ use gpui::{
     AnyWindowHandle, BackgroundExecutor, Bounds, Capslock, DevicePixels, DispatchEventResult,
     ForegroundExecutor, GpuSpecs, Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
     PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
-    Scene, Size, Task, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowParams,
-    px,
+    Scene, Size, Task, TouchEvent, TouchId, TouchPhase, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowParams, point, px,
 };
 use gpui_wgpu::{GpuContext, WgpuRenderer, WgpuSurfaceConfig};
 use objc2::rc::Retained;
 use objc2::runtime::AnyClass;
-use objc2::{ClassType, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2_foundation::NSSet;
 use objc2_quartz_core::CAMetalLayer;
-use objc2_ui_kit::{UIScreen, UIView, UIViewController, UIWindow};
+use objc2_ui_kit::{UIEvent, UIScreen, UITouch, UIView, UIViewController, UIWindow};
 use raw_window_handle as rwh;
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::ptr::NonNull;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::time::Duration;
 
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 
+pub(crate) struct MetalViewIvars {
+    // Filled in by `IosWindow::new` once the window state exists; the view is
+    // created first because the renderer needs its pointer.
+    window: RefCell<Weak<IosWindowInner>>,
+}
+
 define_class!(
     // A `UIView` whose backing layer is a `CAMetalLayer`, so wgpu can render
     // into the view directly instead of attaching a sublayer that would need
-    // manual resizing.
+    // manual resizing. Also the entry point for touch input.
     #[unsafe(super(UIView))]
     #[thread_kind = MainThreadOnly]
     #[name = "GPUIMetalView"]
+    #[ivars = MetalViewIvars]
     pub(crate) struct MetalView;
 
     impl MetalView {
@@ -37,8 +45,61 @@ define_class!(
         fn layer_class() -> &'static AnyClass {
             CAMetalLayer::class()
         }
+
+        #[unsafe(method(touchesBegan:withEvent:))]
+        fn touches_began(&self, touches: &NSSet<UITouch>, _event: Option<&UIEvent>) {
+            self.dispatch_touches(touches, TouchPhase::Started);
+        }
+
+        #[unsafe(method(touchesMoved:withEvent:))]
+        fn touches_moved(&self, touches: &NSSet<UITouch>, _event: Option<&UIEvent>) {
+            self.dispatch_touches(touches, TouchPhase::Moved);
+        }
+
+        #[unsafe(method(touchesEnded:withEvent:))]
+        fn touches_ended(&self, touches: &NSSet<UITouch>, _event: Option<&UIEvent>) {
+            self.dispatch_touches(touches, TouchPhase::Ended);
+        }
+
+        #[unsafe(method(touchesCancelled:withEvent:))]
+        fn touches_cancelled(&self, touches: &NSSet<UITouch>, _event: Option<&UIEvent>) {
+            self.dispatch_touches(touches, TouchPhase::Cancelled);
+        }
     }
 );
+
+impl MetalView {
+    fn new(main_thread: MainThreadMarker, frame: objc2_core_foundation::CGRect) -> Retained<Self> {
+        let this = Self::alloc(main_thread).set_ivars(MetalViewIvars {
+            window: RefCell::new(Weak::new()),
+        });
+        unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+
+    fn dispatch_touches(&self, touches: &NSSet<UITouch>, phase: TouchPhase) {
+        let Some(window) = self.ivars().window.borrow().upgrade() else {
+            return;
+        };
+        let view: &UIView = self;
+        for touch in touches {
+            let location = touch.locationInView(Some(view));
+            let maximum_force = touch.maximumPossibleForce();
+            let force = if maximum_force > 0.0 {
+                Some((touch.force() / maximum_force) as f32)
+            } else {
+                None
+            };
+            window.dispatch_input(PlatformInput::Touch(TouchEvent {
+                // UITouch instances are stable for the lifetime of their touch,
+                // so the object address serves as the touch id.
+                id: TouchId(Retained::as_ptr(&touch) as usize as u64),
+                phase,
+                position: point(px(location.x as f32), px(location.y as f32)),
+                force,
+            }));
+        }
+    }
+}
 
 /// Raw pointers handed to wgpu for surface creation.
 ///
@@ -92,6 +153,15 @@ pub(crate) struct IosWindowInner {
     callbacks: RefCell<IosWindowCallbacks>,
 }
 
+impl IosWindowInner {
+    fn dispatch_input(&self, input: PlatformInput) {
+        let mut callbacks = self.callbacks.borrow_mut();
+        if let Some(input_callback) = callbacks.input.as_mut() {
+            input_callback(input);
+        }
+    }
+}
+
 pub(crate) struct IosWindow {
     inner: Rc<IosWindowInner>,
     display: Rc<dyn PlatformDisplay>,
@@ -123,9 +193,9 @@ impl IosWindow {
 
         let ui_window: Retained<UIWindow> =
             unsafe { msg_send![UIWindow::alloc(main_thread), initWithFrame: screen_bounds] };
-        let view: Retained<MetalView> =
-            unsafe { msg_send![MetalView::alloc(main_thread), initWithFrame: screen_bounds] };
+        let view = MetalView::new(main_thread, screen_bounds);
         view.setContentScaleFactor(scale_factor as f64);
+        view.setMultipleTouchEnabled(true);
 
         let view_controller: Retained<UIViewController> =
             unsafe { msg_send![UIViewController::alloc(main_thread), init] };
@@ -173,6 +243,8 @@ impl IosWindow {
             }),
             callbacks: RefCell::new(IosWindowCallbacks::default()),
         });
+
+        *view.ivars().window.borrow_mut() = Rc::downgrade(&inner);
 
         let frame_task = foreground_executor.spawn({
             let inner = Rc::downgrade(&inner);

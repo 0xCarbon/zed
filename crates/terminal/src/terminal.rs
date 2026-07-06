@@ -2402,7 +2402,7 @@ impl Terminal {
 
                 Some(new_offset - old_offset)
             }
-            TouchPhase::Ended => None,
+            TouchPhase::Ended | TouchPhase::Cancelled => None,
         }
     }
 

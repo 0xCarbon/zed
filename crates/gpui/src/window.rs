@@ -15,10 +15,10 @@ use crate::{
     SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
     StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab,
     SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextRenderingMode, TextStyle,
-    TextStyleRefinement, ThermalState, TransformationMatrix, Underline, UnderlineStyle,
-    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations,
-    WindowOptions, WindowParams, WindowTextSystem, point, prelude::*, profiler, px, rems, size,
-    transparent_black,
+    TextStyleRefinement, ThermalState, TouchEvent, TouchId, TouchPhase, TransformationMatrix,
+    Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
+    WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem, point,
+    prelude::*, profiler, px, rems, size, transparent_black,
 };
 
 use anyhow::{Context as _, Result, anyhow};
@@ -577,6 +577,18 @@ type FrameCallback = Box<dyn FnOnce(&mut Window, &mut App)>;
 pub(crate) type AnyMouseListener =
     Box<dyn FnMut(&dyn Any, DispatchPhase, &mut Window, &mut App) + 'static>;
 
+pub(crate) type AnyTouchListener =
+    Box<dyn FnMut(&TouchEvent, DispatchPhase, &mut Window, &mut App) + 'static>;
+
+/// The state of one active touch, from `Started` until `Ended` or `Cancelled`.
+///
+/// The hit test is computed once, when the touch starts, and reused for every
+/// subsequent event of the touch: a touch is implicitly captured by the
+/// elements it started on, unlike a mouse pointer which re-targets as it moves.
+pub(crate) struct ActiveTouch {
+    pub(crate) hit_test: HitTest,
+}
+
 #[derive(Clone)]
 pub(crate) struct CursorStyleRequest {
     pub(crate) hitbox_id: Option<HitboxId>,
@@ -657,6 +669,22 @@ impl HitboxId {
         false
     }
 
+    /// Checks whether the given touch is targeting the hitbox with this ID.
+    ///
+    /// A touch targets the hitboxes that were hit by its `Started` position and
+    /// continues to target them for its entire lifetime, even when it moves
+    /// outside of their bounds.
+    pub fn contains_touch(self, touch_id: TouchId, window: &Window) -> bool {
+        window.active_touches.get(&touch_id).is_some_and(|touch| {
+            touch
+                .hit_test
+                .ids
+                .iter()
+                .take(touch.hit_test.hover_hitbox_count)
+                .any(|id| *id == self)
+        })
+    }
+
     /// Checks if the hitbox with this ID contains the mouse and should handle scroll events.
     /// Typically this should only be used when handling `ScrollWheelEvent`, and otherwise
     /// `is_hovered` should be used. See the documentation of `Hitbox::is_hovered` for details about
@@ -714,6 +742,13 @@ impl Hitbox {
     /// this sets `HitboxBehavior::BlockMouse` (`InteractiveElement::occlude`).
     pub fn should_handle_scroll(&self, window: &Window) -> bool {
         self.id.should_handle_scroll(window)
+    }
+
+    /// Checks whether the given touch is targeting this hitbox.
+    ///
+    /// See [`HitboxId::contains_touch`] for details.
+    pub fn contains_touch(&self, touch_id: TouchId, window: &Window) -> bool {
+        self.id.contains_touch(touch_id, window)
     }
 }
 
@@ -824,6 +859,7 @@ pub(crate) struct Frame {
     pub(crate) element_states: FxHashMap<(GlobalElementId, TypeId), ElementStateBox>,
     accessed_element_states: Vec<(GlobalElementId, TypeId)>,
     pub(crate) mouse_listeners: Vec<Option<AnyMouseListener>>,
+    pub(crate) touch_listeners: Vec<Option<AnyTouchListener>>,
     pub(crate) dispatch_tree: DispatchTree,
     pub(crate) scene: Scene,
     pub(crate) hitboxes: Vec<Hitbox>,
@@ -855,6 +891,7 @@ pub(crate) struct PrepaintStateIndex {
 pub(crate) struct PaintIndex {
     scene_index: usize,
     mouse_listeners_index: usize,
+    touch_listeners_index: usize,
     input_handlers_index: usize,
     cursor_styles_index: usize,
     accessed_element_states_index: usize,
@@ -870,6 +907,7 @@ impl Frame {
             element_states: FxHashMap::default(),
             accessed_element_states: Vec::new(),
             mouse_listeners: Vec::new(),
+            touch_listeners: Vec::new(),
             dispatch_tree,
             scene: Scene::default(),
             hitboxes: Vec::new(),
@@ -895,6 +933,7 @@ impl Frame {
         self.element_states.clear();
         self.accessed_element_states.clear();
         self.mouse_listeners.clear();
+        self.touch_listeners.clear();
         self.dispatch_tree.clear();
         self.scene.clear();
         self.input_handlers.clear();
@@ -1021,6 +1060,7 @@ pub struct Window {
     default_prevented: bool,
     mouse_position: Point<Pixels>,
     mouse_hit_test: HitTest,
+    active_touches: FxHashMap<TouchId, ActiveTouch>,
     modifiers: Modifiers,
     capslock: Capslock,
     scale_factor: f32,
@@ -1717,6 +1757,7 @@ impl Window {
             default_prevented: true,
             mouse_position,
             mouse_hit_test: HitTest::default(),
+            active_touches: FxHashMap::default(),
             modifiers,
             capslock,
             scale_factor,
@@ -3100,6 +3141,7 @@ impl Window {
         PaintIndex {
             scene_index: self.next_frame.scene.len(),
             mouse_listeners_index: self.next_frame.mouse_listeners.len(),
+            touch_listeners_index: self.next_frame.touch_listeners.len(),
             input_handlers_index: self.next_frame.input_handlers.len(),
             cursor_styles_index: self.next_frame.cursor_styles.len(),
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
@@ -3124,6 +3166,12 @@ impl Window {
         self.next_frame.mouse_listeners.extend(
             self.rendered_frame.mouse_listeners
                 [range.start.mouse_listeners_index..range.end.mouse_listeners_index]
+                .iter_mut()
+                .map(|listener| listener.take()),
+        );
+        self.next_frame.touch_listeners.extend(
+            self.rendered_frame.touch_listeners
+                [range.start.touch_listeners_index..range.end.touch_listeners_index]
                 .iter_mut()
                 .map(|listener| listener.take()),
         );
@@ -4349,6 +4397,25 @@ impl Window {
         )));
     }
 
+    /// Register a touch event listener on the window for the next frame. When the next frame is
+    /// rendered the listener will be cleared.
+    ///
+    /// Use [`HitboxId::contains_touch`] to determine whether a touch is targeting a given
+    /// element: touches target the elements hit by their starting position for their entire
+    /// lifetime, rather than re-targeting as they move the way the mouse pointer does.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn on_touch_event(
+        &mut self,
+        listener: impl FnMut(&TouchEvent, DispatchPhase, &mut Window, &mut App) + 'static,
+    ) {
+        self.invalidator.debug_assert_paint();
+
+        self.next_frame
+            .touch_listeners
+            .push(Some(Box::new(listener)));
+    }
+
     /// Register a key event listener on this node for the next frame. The type of event
     /// is determined by the first parameter of the given listener. When the next frame is rendered
     /// the listener will be cleared.
@@ -4599,10 +4666,23 @@ impl Window {
                     PlatformInput::FileDrop(FileDropEvent::Exited)
                 }
             },
+            PlatformInput::Touch(touch) => {
+                if touch.phase == TouchPhase::Started {
+                    self.active_touches.insert(
+                        touch.id,
+                        ActiveTouch {
+                            hit_test: self.rendered_frame.hit_test(touch.position),
+                        },
+                    );
+                }
+                PlatformInput::Touch(touch)
+            }
             PlatformInput::KeyDown(_) | PlatformInput::KeyUp(_) => event,
         };
 
-        if let Some(any_mouse_event) = event.mouse_event() {
+        if let Some(touch_event) = event.touch_event() {
+            self.dispatch_touch_event(touch_event, cx);
+        } else if let Some(any_mouse_event) = event.mouse_event() {
             self.dispatch_mouse_event(any_mouse_event, cx);
         } else if let Some(any_key_event) = event.keyboard_event() {
             self.dispatch_key_event(any_key_event, cx);
@@ -4679,6 +4759,34 @@ impl Window {
         // Auto-release pointer capture on mouse up
         if event.is::<MouseUpEvent>() && self.captured_hitbox.is_some() {
             self.captured_hitbox = None;
+        }
+    }
+
+    fn dispatch_touch_event(&mut self, event: &TouchEvent, cx: &mut App) {
+        let mut touch_listeners = mem::take(&mut self.rendered_frame.touch_listeners);
+
+        for listener in &mut touch_listeners {
+            let listener = listener.as_mut().unwrap();
+            listener(event, DispatchPhase::Capture, self, cx);
+            if !cx.propagate_event {
+                break;
+            }
+        }
+
+        if cx.propagate_event {
+            for listener in touch_listeners.iter_mut().rev() {
+                let listener = listener.as_mut().unwrap();
+                listener(event, DispatchPhase::Bubble, self, cx);
+                if !cx.propagate_event {
+                    break;
+                }
+            }
+        }
+
+        self.rendered_frame.touch_listeners = touch_listeners;
+
+        if matches!(event.phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+            self.active_touches.remove(&event.id);
         }
     }
 

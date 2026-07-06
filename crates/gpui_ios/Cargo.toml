@@ -4,6 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
 license = "Apache-2.0"
+autoexamples = false
 
 [lints]
 workspace = true
@@ -26,7 +27,13 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
     "std",
     "CFCGTypes",
 ] }
-objc2-foundation = { workspace = true, features = ["NSString", "NSThread"] }
+objc2-foundation = { workspace = true, features = [
+    "NSArray",
+    "NSEnumerator",
+    "NSSet",
+    "NSString",
+    "NSThread",
+] }
 objc2-quartz-core = { version = "0.3", default-features = false, features = [
     "std",
     "objc2-metal",
@@ -38,8 +45,10 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "objc2-core-foundation",
     "UIApplication",
     "UIDevice",
+    "UIEvent",
     "UIResponder",
     "UIScreen",
+    "UITouch",
     "UIView",
     "UIViewController",
     "UIWindow",
