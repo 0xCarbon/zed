@@ -1,9 +1,11 @@
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::cell::Cell;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::Result;
 use gpui::*;
 use gpui_util::ResultExt;
+use parking_lot::Mutex;
 use windows::Win32::{
     Foundation::*,
     Graphics::{DirectManipulation::*, Gdi::*},
@@ -24,8 +26,13 @@ pub(crate) struct DirectManipulationHandler {
     viewport: IDirectManipulationViewport,
     _handler_cookie: u32,
     window: NonNullHwnd,
-    scale_factor: Rc<Cell<f32>>,
-    pending_events: Rc<RefCell<Vec<PlatformInput>>>,
+    // Shared with the `DirectManipulationEventHandler` COM object. DirectManipulation may
+    // release that handler (and thus drop its clones of these) on its own delegate thread
+    // while the UI thread is still using ours, so these must be thread-safe: a non-atomic
+    // `Rc`/`Cell`/`RefCell` would race on the refcount and inner data. `scale_factor` stores
+    // the `f32` as bits via `AtomicU32`.
+    scale_factor: Arc<AtomicU32>,
+    pending_events: Arc<Mutex<Vec<PlatformInput>>>,
 }
 
 impl DirectManipulationHandler {
@@ -64,14 +71,14 @@ impl DirectManipulationHandler {
             manager.Activate(window.hwnd())?;
             viewport.Enable()?;
 
-            let scale_factor = Rc::new(Cell::new(scale_factor));
-            let pending_events = Rc::new(RefCell::new(Vec::new()));
+            let scale_factor = Arc::new(AtomicU32::new(scale_factor.to_bits()));
+            let pending_events = Arc::new(Mutex::new(Vec::new()));
 
             let event_handler: IDirectManipulationViewportEventHandler =
                 DirectManipulationEventHandler::new(
                     window,
-                    Rc::clone(&scale_factor),
-                    Rc::clone(&pending_events),
+                    Arc::clone(&scale_factor),
+                    Arc::clone(&pending_events),
                 )
                 .into();
 
@@ -96,7 +103,8 @@ impl DirectManipulationHandler {
     }
 
     pub fn set_scale_factor(&self, scale_factor: f32) {
-        self.scale_factor.set(scale_factor);
+        self.scale_factor
+            .store(scale_factor.to_bits(), Ordering::Relaxed);
     }
 
     pub fn on_pointer_hit_test(&self, wparam: WPARAM) {
@@ -117,7 +125,7 @@ impl DirectManipulationHandler {
     }
 
     pub fn drain_events(&self) -> Vec<PlatformInput> {
-        std::mem::take(&mut *self.pending_events.borrow_mut())
+        std::mem::take(&mut *self.pending_events.lock())
     }
 }
 
@@ -141,20 +149,20 @@ enum GestureKind {
 #[windows_core::implement(IDirectManipulationViewportEventHandler)]
 struct DirectManipulationEventHandler {
     window: NonNullHwnd,
-    scale_factor: Rc<Cell<f32>>,
+    scale_factor: Arc<AtomicU32>,
     gesture_kind: Cell<GestureKind>,
     last_scale: Cell<f32>,
     last_x_offset: Cell<f32>,
     last_y_offset: Cell<f32>,
     scroll_phase: Cell<TouchPhase>,
-    pending_events: Rc<RefCell<Vec<PlatformInput>>>,
+    pending_events: Arc<Mutex<Vec<PlatformInput>>>,
 }
 
 impl DirectManipulationEventHandler {
     fn new(
         window: NonNullHwnd,
-        scale_factor: Rc<Cell<f32>>,
-        pending_events: Rc<RefCell<Vec<PlatformInput>>>,
+        scale_factor: Arc<AtomicU32>,
+        pending_events: Arc<Mutex<Vec<PlatformInput>>>,
     ) -> Self {
         Self {
             window,
@@ -178,7 +186,7 @@ impl DirectManipulationEventHandler {
         match self.gesture_kind.get() {
             GestureKind::Scroll => {
                 self.pending_events
-                    .borrow_mut()
+                    .lock()
                     .push(PlatformInput::ScrollWheel(ScrollWheelEvent {
                         position,
                         delta: ScrollDelta::Pixels(point(px(0.0), px(0.0))),
@@ -188,7 +196,7 @@ impl DirectManipulationEventHandler {
             }
             GestureKind::Pinch => {
                 self.pending_events
-                    .borrow_mut()
+                    .lock()
                     .push(PlatformInput::Pinch(PinchEvent {
                         position,
                         delta: 0.0,
@@ -202,7 +210,7 @@ impl DirectManipulationEventHandler {
     }
 
     fn mouse_position(&self) -> Point<Pixels> {
-        let scale_factor = self.scale_factor.get();
+        let scale_factor = f32::from_bits(self.scale_factor.load(Ordering::Relaxed));
         unsafe {
             let mut point: POINT = std::mem::zeroed();
             let _ = GetCursorPos(&mut point);
@@ -281,7 +289,7 @@ impl IDirectManipulationViewportEventHandler_Impl for DirectManipulationEventHan
         }
 
         let scale = xform[0];
-        let scale_factor = self.scale_factor.get();
+        let scale_factor = f32::from_bits(self.scale_factor.load(Ordering::Relaxed));
         let x_offset = xform[4] / scale_factor;
         let y_offset = xform[5] / scale_factor;
 
@@ -312,7 +320,7 @@ impl IDirectManipulationViewportEventHandler_Impl for DirectManipulationEventHan
                 self.end_gesture();
                 self.gesture_kind.set(GestureKind::Pinch);
                 self.pending_events
-                    .borrow_mut()
+                    .lock()
                     .push(PlatformInput::Pinch(PinchEvent {
                         position,
                         delta: 0.0,
@@ -332,7 +340,7 @@ impl IDirectManipulationViewportEventHandler_Impl for DirectManipulationEventHan
                 let touch_phase = self.scroll_phase.get();
                 self.scroll_phase.set(TouchPhase::Moved);
                 self.pending_events
-                    .borrow_mut()
+                    .lock()
                     .push(PlatformInput::ScrollWheel(ScrollWheelEvent {
                         position,
                         delta: ScrollDelta::Pixels(point(px(dx), px(dy))),
@@ -343,7 +351,7 @@ impl IDirectManipulationViewportEventHandler_Impl for DirectManipulationEventHan
             GestureKind::Pinch => {
                 let scale_delta = scale / last_scale;
                 self.pending_events
-                    .borrow_mut()
+                    .lock()
                     .push(PlatformInput::Pinch(PinchEvent {
                         position,
                         delta: scale_delta - 1.0,
