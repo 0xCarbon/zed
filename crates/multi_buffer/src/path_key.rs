@@ -180,6 +180,29 @@ impl MultiBuffer {
         inserted
     }
 
+    /// Sets excerpt ranges without merging adjacent or overlapping ranges.
+    ///
+    /// `excerpt_ranges` must be sorted by context start and must not overlap.
+    pub fn set_exact_excerpt_ranges_for_path(
+        &mut self,
+        path: PathKey,
+        buffer: Entity<Buffer>,
+        buffer_snapshot: &BufferSnapshot,
+        excerpt_ranges: Vec<ExcerptRange<Point>>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let excerpt_ranges = excerpt_ranges
+            .into_iter()
+            .map(|range| ExcerptRange {
+                context: buffer_snapshot.anchor_before(range.context.start)
+                    ..buffer_snapshot.anchor_after(range.context.end),
+                primary: buffer_snapshot.anchor_before(range.primary.start)
+                    ..buffer_snapshot.anchor_after(range.primary.end),
+            })
+            .collect();
+        self.update_path_excerpts(path, buffer, buffer_snapshot, &excerpt_ranges, cx)
+    }
+
     pub fn set_anchored_excerpts_for_path(
         &self,
         path_key: PathKey,

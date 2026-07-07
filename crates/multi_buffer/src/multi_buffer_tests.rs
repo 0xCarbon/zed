@@ -1060,6 +1060,44 @@ fn test_empty_multibuffer(cx: &mut App) {
 }
 
 #[gpui::test]
+fn test_set_exact_excerpt_ranges_for_path_preserves_primary_ranges(cx: &mut App) {
+    let buffer = cx.new(|cx| Buffer::local(sample_text(8, 6, 'a'), cx));
+    let multibuffer = cx.new(|_| MultiBuffer::new(Capability::ReadWrite));
+    let buffer_snapshot = buffer.read(cx).snapshot();
+    let ranges = vec![
+        ExcerptRange {
+            context: Point::new(0, 0)..Point::new(3, 0),
+            primary: Point::new(1, 0)..Point::new(2, 0),
+        },
+        ExcerptRange {
+            context: Point::new(4, 0)..Point::new(6, 0),
+            primary: Point::new(5, 0)..Point::new(5, 6),
+        },
+    ];
+
+    multibuffer.update(cx, |multibuffer, cx| {
+        multibuffer.set_exact_excerpt_ranges_for_path(
+            PathKey::sorted(0),
+            buffer.clone(),
+            &buffer_snapshot,
+            ranges.clone(),
+            cx,
+        );
+    });
+
+    let snapshot = multibuffer.read(cx).snapshot(cx);
+    let excerpts = snapshot
+        .excerpts_for_buffer(buffer_snapshot.remote_id())
+        .map(|excerpt| ExcerptRange {
+            context: excerpt.context.to_point(&buffer_snapshot),
+            primary: excerpt.primary.to_point(&buffer_snapshot),
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(excerpts, ranges);
+}
+
+#[gpui::test]
 async fn test_empty_diff_excerpt(cx: &mut TestAppContext) {
     let multibuffer = cx.new(|_| MultiBuffer::new(Capability::ReadWrite));
     let buffer = cx.new(|cx| Buffer::local("", cx));

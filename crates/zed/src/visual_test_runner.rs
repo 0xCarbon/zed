@@ -103,8 +103,9 @@ use {
     feature_flags::FeatureFlagAppExt as _,
     git_ui::project_diff::ProjectDiff,
     gpui::{
-        App, AppContext as _, Bounds, Entity, IntoElement, KeyBinding, Modifiers, Render,
-        VisualTestAppContext, WindowBounds, WindowHandle, WindowOptions, point, px, size,
+        App, AppContext as _, Bounds, Capslock, Entity, Focusable as _, IntoElement, KeyBinding,
+        Modifiers, ModifiersChangedEvent, Render, VisualTestAppContext, WindowBounds, WindowHandle,
+        WindowOptions, point, px, size,
     },
     image::RgbaImage,
     project::{AgentId, Project},
@@ -3367,25 +3368,88 @@ fn run_edit_prediction_multibuffer_jump_visual_tests(
             cx.run_until_parked();
         }
 
-        let result = run_visual_test(preview_case.test_name, window.into(), cx, update_baseline);
+        let mut record_result = |result| match result {
+            Ok(TestResult::Passed) => {}
+            Ok(TestResult::BaselineUpdated(path)) => has_baseline_update = Some(path),
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        };
+
+        if preview_case.test_name == "edit_prediction_multibuffer_top_excerpt_expands_upward" {
+            window
+                .update(cx, |view, window, cx| {
+                    let focus_handle = view.editor.read(cx).focus_handle(cx);
+                    window.focus(&focus_handle, cx);
+                })
+                .log_err();
+
+            for (test_name, modifiers, accept_count) in [
+                (
+                    "edit_prediction_multibuffer_top_excerpt_expands_upward_preview_initial",
+                    None,
+                    0,
+                ),
+                (
+                    "edit_prediction_multibuffer_top_excerpt_expands_upward_preview_held",
+                    Some(Modifiers::alt()),
+                    0,
+                ),
+                (
+                    "edit_prediction_multibuffer_top_excerpt_expands_upward_preview_released",
+                    Some(Modifiers::none()),
+                    0,
+                ),
+                (
+                    "edit_prediction_multibuffer_top_excerpt_expands_upward_preview_accepted",
+                    Some(Modifiers::alt()),
+                    2,
+                ),
+            ] {
+                if let Some(modifiers) = modifiers {
+                    cx.simulate_event(
+                        window.into(),
+                        ModifiersChangedEvent {
+                            modifiers,
+                            capslock: Capslock { on: false },
+                        },
+                    );
+                }
+                for _ in 0..accept_count {
+                    cx.dispatch_action(window.into(), editor::actions::AcceptEditPrediction);
+                }
+                if accept_count > 0 {
+                    cx.simulate_event(
+                        window.into(),
+                        ModifiersChangedEvent {
+                            modifiers: Modifiers::none(),
+                            capslock: Capslock { on: false },
+                        },
+                    );
+                }
+                record_result(run_visual_test(
+                    test_name,
+                    window.into(),
+                    cx,
+                    update_baseline,
+                ));
+            }
+        } else {
+            record_result(run_visual_test(
+                preview_case.test_name,
+                window.into(),
+                cx,
+                update_baseline,
+            ));
+        }
 
         cx.update_window(window.into(), |_, window, _cx| {
             window.remove_window();
         })
         .log_err();
         cx.run_until_parked();
-
-        match result {
-            Ok(TestResult::Passed) => {}
-            Ok(TestResult::BaselineUpdated(path)) => {
-                has_baseline_update = Some(path);
-            }
-            Err(error) => {
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
-            }
-        }
     }
 
     for _ in 0..15 {

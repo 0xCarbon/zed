@@ -106,7 +106,7 @@ pub(super) struct EditPredictionExcerptExpansion {
 
 #[derive(Clone)]
 struct EditPredictionPreviewDelegate {
-    prediction: edit_prediction_types::EditPrediction,
+    prediction: Option<edit_prediction_types::EditPrediction>,
 }
 
 impl EditPredictionDelegate for EditPredictionPreviewDelegate {
@@ -144,7 +144,9 @@ impl EditPredictionDelegate for EditPredictionPreviewDelegate {
     ) {
     }
 
-    fn accept(&mut self, _cx: &mut Context<Self>) {}
+    fn accept(&mut self, _cx: &mut Context<Self>) {
+        self.prediction = None;
+    }
 
     fn discard(&mut self, _reason: EditPredictionDiscardReason, _cx: &mut Context<Self>) {}
 
@@ -154,7 +156,7 @@ impl EditPredictionDelegate for EditPredictionPreviewDelegate {
         _: language::Anchor,
         _: &mut Context<Self>,
     ) -> Option<edit_prediction_types::EditPrediction> {
-        Some(self.prediction.clone())
+        self.prediction.clone()
     }
 }
 
@@ -394,7 +396,9 @@ fn editor_preview(
             );
             multi_buffer
         });
-        let provider = cx.new(|_| EditPredictionPreviewDelegate { prediction });
+        let provider = cx.new(|_| EditPredictionPreviewDelegate {
+            prediction: Some(prediction),
+        });
         let mut editor = Editor::for_multibuffer(multi_buffer.clone(), None, window, cx);
         if let Some(cursor) = multi_buffer
             .read(cx)
@@ -441,7 +445,9 @@ fn jump_preview(
             );
             multi_buffer
         });
-        let provider = cx.new(|_| EditPredictionPreviewDelegate { prediction });
+        let provider = cx.new(|_| EditPredictionPreviewDelegate {
+            prediction: Some(prediction),
+        });
         let mut editor = Editor::for_multibuffer(multi_buffer, None, window, cx);
         editor.set_edit_prediction_provider(Some(provider), window, cx);
         editor.update_visible_edit_prediction(window, cx);
@@ -515,7 +521,15 @@ pub(super) enum EditPredictionPreview {
     Active {
         since: Instant,
         previous_scroll_position: Option<SharedScrollAnchor>,
+        previous_scroll_offset: Option<gpui::Point<ScrollOffset>>,
+        previous_excerpt_state: Option<EditPredictionExcerptState>,
     },
+}
+
+pub(super) struct EditPredictionExcerptState {
+    path: PathKey,
+    buffer: Entity<Buffer>,
+    ranges: Vec<ExcerptRange<Point>>,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -560,6 +574,16 @@ impl EditPredictionPreview {
         } = self
         {
             *previous_scroll_position = scroll_position;
+        }
+    }
+
+    pub(super) fn clear_previous_excerpt_state(&mut self) {
+        if let EditPredictionPreview::Active {
+            previous_excerpt_state,
+            ..
+        } = self
+        {
+            *previous_excerpt_state = None;
         }
     }
 }
@@ -833,26 +857,9 @@ impl Editor {
                             return;
                         }
                         Some(EditPredictionJumpAction::ExpandExcerpt(expansion)) => {
-                            self.buffer.update(cx, |multi_buffer, cx| {
-                                let buffer_snapshot = expansion.buffer.read(cx).snapshot();
-                                let snapshot = multi_buffer.snapshot(cx);
-                                let path = snapshot
-                                    .path_for_buffer(buffer_snapshot.remote_id())
-                                    .cloned()
-                                    .unwrap_or_else(|| PathKey::for_buffer(&expansion.buffer, cx));
-                                let mut ranges = snapshot
-                                    .excerpts_for_buffer(buffer_snapshot.remote_id())
-                                    .map(|excerpt| excerpt.primary.to_point(&buffer_snapshot))
-                                    .collect::<Vec<_>>();
-                                ranges.extend(expansion.ranges.clone());
-                                multi_buffer.update_excerpts_for_path(
-                                    path,
-                                    expansion.buffer.clone(),
-                                    ranges,
-                                    multibuffer_context_lines(cx),
-                                    cx,
-                                );
-                            });
+                            let expansion = expansion.clone();
+                            self.edit_prediction_preview.clear_previous_excerpt_state();
+                            self.expand_edit_prediction_excerpt(&expansion, cx);
 
                             if let Some(target) = self
                                 .buffer
@@ -1068,6 +1075,62 @@ impl Editor {
         }
     }
 
+    fn expand_edit_prediction_excerpt(
+        &mut self,
+        expansion: &EditPredictionExcerptExpansion,
+        cx: &mut Context<Self>,
+    ) -> EditPredictionExcerptState {
+        self.buffer.update(cx, |multi_buffer, cx| {
+            let buffer_snapshot = expansion.buffer.read(cx).snapshot();
+            let snapshot = multi_buffer.snapshot(cx);
+            let path = snapshot
+                .path_for_buffer(buffer_snapshot.remote_id())
+                .cloned()
+                .unwrap_or_else(|| PathKey::for_buffer(&expansion.buffer, cx));
+            let previous_ranges = snapshot
+                .excerpts_for_buffer(buffer_snapshot.remote_id())
+                .map(|excerpt| ExcerptRange {
+                    context: excerpt.context.to_point(&buffer_snapshot),
+                    primary: excerpt.primary.to_point(&buffer_snapshot),
+                })
+                .collect::<Vec<_>>();
+            let mut ranges = snapshot
+                .excerpts_for_buffer(buffer_snapshot.remote_id())
+                .map(|excerpt| excerpt.primary.to_point(&buffer_snapshot))
+                .collect::<Vec<_>>();
+            ranges.extend(expansion.ranges.clone());
+            multi_buffer.update_excerpts_for_path(
+                path.clone(),
+                expansion.buffer.clone(),
+                ranges,
+                multibuffer_context_lines(cx),
+                cx,
+            );
+            EditPredictionExcerptState {
+                path,
+                buffer: expansion.buffer.clone(),
+                ranges: previous_ranges,
+            }
+        })
+    }
+
+    fn restore_edit_prediction_excerpt(
+        &mut self,
+        previous_excerpt_state: EditPredictionExcerptState,
+        cx: &mut Context<Self>,
+    ) {
+        self.buffer.update(cx, |multi_buffer, cx| {
+            let buffer_snapshot = previous_excerpt_state.buffer.read(cx).snapshot();
+            multi_buffer.set_exact_excerpt_ranges_for_path(
+                previous_excerpt_state.path,
+                previous_excerpt_state.buffer,
+                &buffer_snapshot,
+                previous_excerpt_state.ranges,
+                cx,
+            );
+        });
+    }
+
     pub fn accept_next_word_edit_prediction(
         &mut self,
         _: &AcceptNextWordEditPrediction,
@@ -1092,6 +1155,7 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.edit_prediction_preview.clear_previous_excerpt_state();
         self.accept_partial_edit_prediction(EditPredictionGranularity::Full, window, cx);
     }
 
@@ -1270,20 +1334,94 @@ impl Editor {
                 self.edit_prediction_preview,
                 EditPredictionPreview::Inactive { .. }
             ) {
+                let excerpt_expansion =
+                    self.active_edit_prediction
+                        .as_ref()
+                        .and_then(|active_edit_prediction| {
+                            match &active_edit_prediction.completion {
+                                EditPrediction::MoveWithin {
+                                    accept_action:
+                                        Some(EditPredictionJumpAction::ExpandExcerpt(expansion)),
+                                    ..
+                                } => Some(expansion.clone()),
+                                _ => None,
+                            }
+                        });
+
                 self.edit_prediction_preview = EditPredictionPreview::Active {
                     previous_scroll_position: None,
+                    previous_scroll_offset: None,
+                    previous_excerpt_state: None,
                     since: Instant::now(),
                 };
+
+                if let Some(expansion) = excerpt_expansion {
+                    let previous_excerpt_state =
+                        self.expand_edit_prediction_excerpt(&expansion, cx);
+
+                    if let Some(target) = self
+                        .buffer
+                        .read(cx)
+                        .snapshot(cx)
+                        .anchor_in_excerpt(expansion.target)
+                    {
+                        if let Some(position_map) = self.last_position_map.as_ref() {
+                            self.edit_prediction_preview
+                                .set_previous_scroll_position(Some(
+                                    position_map.snapshot.scroll_anchor,
+                                ));
+                            let scroll_position = self.scroll_position(cx);
+                            if let EditPredictionPreview::Active {
+                                previous_scroll_offset,
+                                ..
+                            } = &mut self.edit_prediction_preview
+                            {
+                                *previous_scroll_offset = Some(scroll_position);
+                            }
+                        }
+                        self.highlight_rows::<EditPredictionPreview>(
+                            target..target,
+                            |cx| cx.theme().colors().editor_highlighted_line_background,
+                            RowHighlightOptions {
+                                autoscroll: true,
+                                ..Default::default()
+                            },
+                            cx,
+                        );
+                        self.request_autoscroll(Autoscroll::fit(), cx);
+                    }
+
+                    if let EditPredictionPreview::Active {
+                        previous_excerpt_state: state,
+                        ..
+                    } = &mut self.edit_prediction_preview
+                    {
+                        *state = Some(previous_excerpt_state);
+                    }
+                }
 
                 self.update_visible_edit_prediction(window, cx);
                 cx.notify();
             }
         } else if let EditPredictionPreview::Active {
             previous_scroll_position,
+            previous_scroll_offset,
+            previous_excerpt_state,
             since,
-        } = self.edit_prediction_preview
+        } = &mut self.edit_prediction_preview
         {
-            if let (Some(previous_scroll_position), Some(position_map)) =
+            let previous_scroll_position = previous_scroll_position.take();
+            let previous_scroll_offset = previous_scroll_offset.take();
+            let previous_excerpt_state = previous_excerpt_state.take();
+            let released_too_fast = since.elapsed() < Duration::from_millis(200);
+
+            if let Some(previous_excerpt_state) = previous_excerpt_state {
+                self.restore_edit_prediction_excerpt(previous_excerpt_state, cx);
+            }
+
+            if let Some(previous_scroll_offset) = previous_scroll_offset {
+                self.set_scroll_position(previous_scroll_offset, window, cx);
+            } else if let (Some(previous_scroll_position), Some(position_map)) =
                 (previous_scroll_position, self.last_position_map.as_ref())
             {
                 self.set_scroll_position(
@@ -1294,9 +1432,7 @@ impl Editor {
                 );
             }
 
-            self.edit_prediction_preview = EditPredictionPreview::Inactive {
-                released_too_fast: since.elapsed() < Duration::from_millis(200),
-            };
+            self.edit_prediction_preview = EditPredictionPreview::Inactive { released_too_fast };
             self.clear_row_highlights::<EditPredictionPreview>();
             self.update_visible_edit_prediction(window, cx);
             cx.notify();
