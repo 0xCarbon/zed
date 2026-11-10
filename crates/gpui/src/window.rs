@@ -4643,6 +4643,10 @@ impl Window {
                 self.modifiers = mouse_exited.modifiers;
                 PlatformInput::MouseExited(mouse_exited)
             }
+            PlatformInput::RelativeMotion(motion) => {
+                self.modifiers = motion.modifiers;
+                PlatformInput::RelativeMotion(motion)
+            }
             PlatformInput::ModifiersChanged(modifiers_changed) => {
                 self.modifiers = modifiers_changed.modifiers;
                 self.capslock = modifiers_changed.capslock;

@@ -416,6 +416,31 @@ impl InputEvent for MouseMoveEvent {
 }
 impl MouseEvent for MouseMoveEvent {}
 
+/// Raw relative pointer motion, delivered in order with the other input events
+/// while the pointer is locked ([`crate::Platform::set_pointer_locked`]). The
+/// absolute position does not change while locked, so this is the only motion.
+/// Receive it with `Window::on_mouse_event::<RelativeMotionEvent>`.
+#[derive(Clone, Debug, Default)]
+pub struct RelativeMotionEvent {
+    /// Unaccelerated device-unit delta since the previous event.
+    pub delta: Point<f32>,
+
+    /// The modifiers that were held down.
+    pub modifiers: Modifiers,
+
+    /// When the motion happened, on the platform's monotonic input clock
+    /// (Wayland: the relative-pointer `utime`; X11: the server timestamp).
+    pub timestamp: std::time::Duration,
+}
+
+impl Sealed for RelativeMotionEvent {}
+impl InputEvent for RelativeMotionEvent {
+    fn to_platform_input(self) -> PlatformInput {
+        PlatformInput::RelativeMotion(self)
+    }
+}
+impl MouseEvent for RelativeMotionEvent {}
+
 impl MouseMoveEvent {
     /// Returns true if the left mouse button is currently held down.
     pub fn dragging(&self) -> bool {
@@ -664,6 +689,8 @@ pub enum PlatformInput {
     MouseMove(MouseMoveEvent),
     /// The mouse exited the window.
     MouseExited(MouseExitEvent),
+    /// Raw relative motion while the pointer is locked.
+    RelativeMotion(RelativeMotionEvent),
     /// The scroll wheel was used.
     ScrollWheel(ScrollWheelEvent),
     /// A pinch gesture was performed.
@@ -683,6 +710,7 @@ impl PlatformInput {
             PlatformInput::MouseMove(event) => Some(event),
             PlatformInput::MousePressure(event) => Some(event),
             PlatformInput::MouseExited(event) => Some(event),
+            PlatformInput::RelativeMotion(event) => Some(event),
             PlatformInput::ScrollWheel(event) => Some(event),
             PlatformInput::Pinch(event) => Some(event),
             PlatformInput::FileDrop(event) => Some(event),
@@ -699,6 +727,7 @@ impl PlatformInput {
             PlatformInput::MouseMove(_) => None,
             PlatformInput::MousePressure(_) => None,
             PlatformInput::MouseExited(_) => None,
+            PlatformInput::RelativeMotion(_) => None,
             PlatformInput::ScrollWheel(_) => None,
             PlatformInput::Pinch(_) => None,
             PlatformInput::FileDrop(_) => None,

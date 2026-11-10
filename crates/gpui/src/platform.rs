@@ -224,6 +224,22 @@ pub trait Platform: 'static {
     /// this application's windows.
     fn hide_cursor_until_mouse_moves(&self);
 
+    /// Capture or release the pointer for relative (first-person style) motion.
+    /// While locked the cursor is hidden and does not move on screen; raw motion
+    /// arrives as [`crate::RelativeMotionEvent`]s through the normal input path. The lock applies to
+    /// the window the pointer is over. A platform that cannot do this returns
+    /// [`PointerLockError::Unsupported`] (the default; implemented for Wayland and
+    /// X11 only).
+    fn set_pointer_locked(&self, _locked: bool) -> Result<(), PointerLockError> {
+        Err(PointerLockError::Unsupported)
+    }
+
+    /// Whether the pointer is currently locked (the compositor may deny or revoke a
+    /// requested lock, e.g. on focus loss).
+    fn is_pointer_locked(&self) -> bool {
+        false
+    }
+
     /// Returns whether the mouse cursor is currently visible.
     fn is_cursor_visible(&self) -> bool;
 
@@ -618,6 +634,29 @@ pub struct RequestFrameOptions {
 }
 
 #[expect(missing_docs)]
+/// Why [`Platform::set_pointer_locked`] failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerLockError {
+    /// This platform backend has no pointer lock.
+    Unsupported,
+    /// No window currently has the pointer (or keyboard focus).
+    NoFocusedWindow,
+    /// The display server refused or lacks the needed protocol.
+    Failed,
+}
+
+impl std::fmt::Display for PointerLockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unsupported => "pointer lock is not supported on this platform",
+            Self::NoFocusedWindow => "no window has the pointer",
+            Self::Failed => "the display server does not allow a pointer lock",
+        })
+    }
+}
+
+impl std::error::Error for PointerLockError {}
+
 pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn bounds(&self) -> Bounds<Pixels>;
     fn is_maximized(&self) -> bool;

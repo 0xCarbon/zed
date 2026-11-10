@@ -29,7 +29,7 @@ use gpui::{
     WindowButtonLayout, WindowParams,
 };
 #[cfg(any(feature = "wayland", feature = "x11"))]
-use gpui::{Pixels, Point, px};
+use gpui::{Pixels, Point, PointerLockError, px};
 
 #[cfg(any(feature = "wayland", feature = "x11"))]
 pub(crate) const SCROLL_LINES: f32 = 3.0;
@@ -80,6 +80,14 @@ pub(crate) trait LinuxClient {
     ) -> anyhow::Result<Box<dyn PlatformWindow>>;
     fn set_cursor_style(&self, style: CursorStyle);
     fn hide_cursor_until_mouse_moves(&self) {}
+
+    fn set_pointer_locked(&self, _locked: bool) -> Result<(), PointerLockError> {
+        Err(PointerLockError::Unsupported)
+    }
+
+    fn is_pointer_locked(&self) -> bool {
+        false
+    }
     fn is_cursor_visible(&self) -> bool {
         true
     }
@@ -602,6 +610,14 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
 
     fn set_cursor_style(&self, style: CursorStyle) {
         self.inner.set_cursor_style(style)
+    }
+
+    fn set_pointer_locked(&self, locked: bool) -> Result<(), PointerLockError> {
+        self.inner.set_pointer_locked(locked)
+    }
+
+    fn is_pointer_locked(&self) -> bool {
+        self.inner.is_pointer_locked()
     }
 
     fn hide_cursor_until_mouse_moves(&self) {
