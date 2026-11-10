@@ -97,7 +97,7 @@ use crate::linux::{
     },
     xdg_desktop_portal::{Event as XDPEvent, XDPEventSource},
 };
-use gpui::{PointerLockError, RelativeMotionEvent, 
+use gpui::{PointerLockError, RawButtonEvent, RawKeyEvent, RelativeMotionEvent, 
     AnyWindowHandle, Bounds, Capslock, CursorStyle, DevicePixels, DisplayId, FileDropEvent,
     ForegroundExecutor, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ModifiersChangedEvent,
     MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection,
@@ -284,6 +284,9 @@ pub(crate) struct WaylandClientState {
     enter_token: Option<()>,
     button_pressed: Option<MouseButton>,
     mouse_focused_window: Option<WaylandWindowStatePtr>,
+    /// The window the pointer last entered; raw button edges go here even when a
+    /// `leave` cleared `mouse_focused_window` (the compositor still routes the edge).
+    last_pointer_window: Option<WaylandWindowStatePtr>,
     keyboard_focused_window: Option<WaylandWindowStatePtr>,
     loop_handle: LoopHandle<'static, WaylandClientStatePtr>,
     cursor_style: Option<CursorStyle>,
@@ -824,6 +827,7 @@ impl WaylandClient {
             horizontal_modifier: -1.0,
             button_pressed: None,
             mouse_focused_window: None,
+            last_pointer_window: None,
             keyboard_focused_window: None,
             loop_handle: handle.clone(),
             enter_token: None,
@@ -1662,6 +1666,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
             wl_keyboard::Event::Key {
                 serial,
                 key,
+                time,
                 state: WEnum::Value(key_state),
                 ..
             } => {
@@ -1671,6 +1676,18 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                 let Some(focused_window) = focused_window else {
                     return;
                 };
+                // The raw edge first, before any keymap, compose or repeat handling.
+                {
+                    let raw = PlatformInput::RawKey(RawKeyEvent {
+                        scancode: key,
+                        pressed: key_state == wl_keyboard::KeyState::Pressed,
+                        modifiers: state.modifiers,
+                        timestamp: Duration::from_millis(u64::from(time)),
+                    });
+                    drop(state);
+                    focused_window.handle_input(raw);
+                    state = client.borrow_mut();
+                }
 
                 let keymap_state = state.keymap_state.as_ref().unwrap();
                 let keycode = Keycode::from(key + MIN_KEYCODE);
@@ -1913,6 +1930,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
 
                 if let Some(window) = get_window(&mut state, &surface.id()) {
                     state.mouse_focused_window = Some(window.clone());
+                    state.last_pointer_window = Some(window.clone());
 
                     if state.enter_token.is_some() {
                         state.enter_token = None;
@@ -2006,6 +2024,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
             }
             wl_pointer::Event::Button {
                 serial,
+                time,
                 button,
                 state: WEnum::Value(button_state),
                 ..
@@ -2013,6 +2032,24 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                 state.serial_tracker.update(SerialKind::MousePress, serial);
                 let button = linux_button_to_gpui(button);
                 let Some(button) = button else { return };
+                // The raw edge goes out for every compositor button event, to the focused
+                // window or the one the pointer last entered, whatever enter/leave did.
+                {
+                    let target = state
+                        .mouse_focused_window
+                        .clone()
+                        .or_else(|| state.last_pointer_window.clone());
+                    if let Some(window) = target {
+                        let raw = PlatformInput::RawButton(RawButtonEvent {
+                            button,
+                            pressed: button_state == wl_pointer::ButtonState::Pressed,
+                            timestamp: Duration::from_millis(u64::from(time)),
+                        });
+                        drop(state);
+                        window.handle_input(raw);
+                        state = client.borrow_mut();
+                    }
+                }
                 if state.mouse_focused_window.is_none() {
                     return;
                 }

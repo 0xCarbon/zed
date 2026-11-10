@@ -441,6 +441,53 @@ impl InputEvent for RelativeMotionEvent {
 }
 impl MouseEvent for RelativeMotionEvent {}
 
+/// A raw key edge from the platform: the physical key (evdev keycode, layout
+/// independent), pressed or released, with no key-repeat synthesis, no keymap or
+/// action dispatch, no IME or dead-key handling. Modifier keys are included.
+/// Delivered to the window with keyboard focus; receive it with
+/// `Window::on_mouse_event::<RawKeyEvent>` (capture phase).
+#[derive(Clone, Debug)]
+pub struct RawKeyEvent {
+    /// The Linux evdev keycode (`KEY_W` = 17, ...). Not an XKB keycode (no +8).
+    pub scancode: u32,
+    /// `true` on press, `false` on release.
+    pub pressed: bool,
+    /// The modifier state when the event arrived.
+    pub modifiers: Modifiers,
+    /// Platform input timestamp.
+    pub timestamp: std::time::Duration,
+}
+
+impl Sealed for RawKeyEvent {}
+impl InputEvent for RawKeyEvent {
+    fn to_platform_input(self) -> PlatformInput {
+        PlatformInput::RawKey(self)
+    }
+}
+impl MouseEvent for RawKeyEvent {}
+
+/// A raw mouse button edge from the platform: exactly one event per physical press
+/// and release, delivered whatever the pointer focus state is (no hit testing, no
+/// click counting, never dropped because the pointer left or re-entered the window).
+/// Receive it with `Window::on_mouse_event::<RawButtonEvent>` (capture phase).
+#[derive(Clone, Debug)]
+pub struct RawButtonEvent {
+    /// Which button.
+    pub button: MouseButton,
+    /// `true` on press, `false` on release.
+    pub pressed: bool,
+    /// Platform input timestamp.
+    pub timestamp: std::time::Duration,
+}
+
+impl Sealed for RawButtonEvent {}
+impl InputEvent for RawButtonEvent {
+    fn to_platform_input(self) -> PlatformInput {
+        PlatformInput::RawButton(self)
+    }
+}
+impl MouseEvent for RawButtonEvent {}
+
 impl MouseMoveEvent {
     /// Returns true if the left mouse button is currently held down.
     pub fn dragging(&self) -> bool {
@@ -691,6 +738,10 @@ pub enum PlatformInput {
     MouseExited(MouseExitEvent),
     /// Raw relative motion while the pointer is locked.
     RelativeMotion(RelativeMotionEvent),
+    /// A raw key press or release (physical key, no repeat, no keymap).
+    RawKey(RawKeyEvent),
+    /// A raw mouse button press or release (exact edges).
+    RawButton(RawButtonEvent),
     /// The scroll wheel was used.
     ScrollWheel(ScrollWheelEvent),
     /// A pinch gesture was performed.
@@ -711,6 +762,8 @@ impl PlatformInput {
             PlatformInput::MousePressure(event) => Some(event),
             PlatformInput::MouseExited(event) => Some(event),
             PlatformInput::RelativeMotion(event) => Some(event),
+            PlatformInput::RawKey(event) => Some(event),
+            PlatformInput::RawButton(event) => Some(event),
             PlatformInput::ScrollWheel(event) => Some(event),
             PlatformInput::Pinch(event) => Some(event),
             PlatformInput::FileDrop(event) => Some(event),
@@ -728,6 +781,8 @@ impl PlatformInput {
             PlatformInput::MousePressure(_) => None,
             PlatformInput::MouseExited(_) => None,
             PlatformInput::RelativeMotion(_) => None,
+            PlatformInput::RawKey(_) => None,
+            PlatformInput::RawButton(_) => None,
             PlatformInput::ScrollWheel(_) => None,
             PlatformInput::Pinch(_) => None,
             PlatformInput::FileDrop(_) => None,

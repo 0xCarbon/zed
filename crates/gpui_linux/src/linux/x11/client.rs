@@ -6,7 +6,7 @@ use calloop::{
 };
 use collections::HashMap;
 use core::str;
-use gpui::{PointerLockError, Capslock, profiler};
+use gpui::{PointerLockError, RawButtonEvent, RawKeyEvent, Capslock, profiler};
 use gpui_util::ResultExt as _;
 use http_client::Url;
 use log::Level;
@@ -386,6 +386,18 @@ impl X11Client {
             .context("Failed to get XCB atoms")?;
 
         let root = xcb_connection.setup().roots[0].root;
+        // Raw key and button edges (see `RawKeyEvent`/`RawButtonEvent`), always on.
+        check_reply(
+            || "Failed to select raw key/button events",
+            xcb_connection.xinput_xi_select_events(
+                root,
+                &[xinput::EventMask {
+                    deviceid: XINPUT_ALL_DEVICE_GROUPS,
+                    mask: vec![raw_edge_mask()],
+                }],
+            ),
+        )
+        .log_err();
         let compositor_present = check_compositor_present(&xcb_connection, root);
         let gtk_frame_extents_supported =
             check_gtk_frame_extents_supported(&xcb_connection, &atoms, root);
@@ -1298,6 +1310,34 @@ impl X11Client {
                     }
                 }
             }
+            Event::XinputRawKeyPress(event) | Event::XinputRawKeyRelease(event) => {
+                let pressed = event.event_type == xinput::RAW_KEY_PRESS_EVENT;
+                let (window, modifiers) = {
+                    let state = self.0.borrow();
+                    (state.keyboard_focused_window, state.modifiers)
+                };
+                let window = self.get_window(window?)?;
+                window.handle_input(PlatformInput::RawKey(RawKeyEvent {
+                    scancode: event.detail.saturating_sub(8),
+                    pressed,
+                    modifiers,
+                    timestamp: Duration::from_millis(u64::from(event.time)),
+                }));
+            }
+            Event::XinputRawButtonPress(event) | Event::XinputRawButtonRelease(event) => {
+                let button = raw_button_to_gpui(event.detail)?;
+                let pressed = event.event_type == xinput::RAW_BUTTON_PRESS_EVENT;
+                let window = {
+                    let state = self.0.borrow();
+                    state.mouse_focused_window.or(state.keyboard_focused_window)
+                };
+                let window = self.get_window(window?)?;
+                window.handle_input(PlatformInput::RawButton(RawButtonEvent {
+                    button,
+                    pressed,
+                    timestamp: Duration::from_millis(u64::from(event.time)),
+                }));
+            }
             Event::XinputRawMotion(event) => {
                 let (window, modifiers) = {
                     let state = self.0.borrow();
@@ -2127,7 +2167,7 @@ impl X11ClientState {
                     root,
                     &[xinput::EventMask {
                         deviceid: XINPUT_ALL_DEVICE_GROUPS,
-                        mask: vec![xinput::XIEventMask::from(0u32)],
+                        mask: vec![raw_edge_mask()],
                     }],
                 ),
             )
@@ -2153,7 +2193,7 @@ impl X11ClientState {
                 root,
                 &[xinput::EventMask {
                     deviceid: XINPUT_ALL_DEVICE_GROUPS,
-                    mask: vec![xinput::XIEventMask::RAW_MOTION],
+                    mask: vec![raw_edge_mask() | xinput::XIEventMask::RAW_MOTION],
                 }],
             ),
         )
@@ -2249,6 +2289,25 @@ pub fn mode_refresh_rate(mode: &randr::ModeInfo) -> Duration {
     let micros = 1_000_000_000 / millihertz;
     log::info!("Refreshing every {}ms", micros / 1_000);
     Duration::from_micros(micros)
+}
+
+/// XInput2 raw key and button edges, selected on the root window.
+fn raw_edge_mask() -> xinput::XIEventMask {
+    xinput::XIEventMask::RAW_KEY_PRESS
+        | xinput::XIEventMask::RAW_KEY_RELEASE
+        | xinput::XIEventMask::RAW_BUTTON_PRESS
+        | xinput::XIEventMask::RAW_BUTTON_RELEASE
+}
+
+fn raw_button_to_gpui(detail: u32) -> Option<MouseButton> {
+    Some(match detail {
+        1 => MouseButton::Left,
+        2 => MouseButton::Middle,
+        3 => MouseButton::Right,
+        8 => MouseButton::Navigate(gpui::NavigationDirection::Back),
+        9 => MouseButton::Navigate(gpui::NavigationDirection::Forward),
+        _ => return None,
+    })
 }
 
 /// The x/y (axes 0 and 1) raw device deltas of an XInput2 raw motion event.
