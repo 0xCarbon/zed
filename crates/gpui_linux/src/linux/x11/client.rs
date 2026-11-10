@@ -6,7 +6,7 @@ use calloop::{
 };
 use collections::HashMap;
 use core::str;
-use gpui::{Capslock, profiler};
+use gpui::{PointerLockError, RawButtonEvent, RawKeyEvent, Capslock, profiler};
 use gpui_util::ResultExt as _;
 use http_client::Url;
 use log::Level;
@@ -213,6 +213,11 @@ pub struct X11ClientState {
     pub(crate) cursor_cache: HashMap<CursorStyle, Option<xproto::Cursor>>,
     pub(crate) invisible_cursor_cache: Option<xproto::Cursor>,
     pub(crate) cursor_hidden_window: Option<xproto::Window>,
+    /// Pointer lock: an active pointer grab (confined to the window, invisible
+    /// cursor) plus XInput2 raw motion on the root window.
+    pointer_locked: bool,
+    /// The window the pointer is locked to; it receives the relative motion events.
+    locked_window: Option<xproto::Window>,
 
     pointer_device_states: BTreeMap<xinput::DeviceId, PointerDeviceState>,
 
@@ -381,6 +386,18 @@ impl X11Client {
             .context("Failed to get XCB atoms")?;
 
         let root = xcb_connection.setup().roots[0].root;
+        // Raw key and button edges (see `RawKeyEvent`/`RawButtonEvent`), always on.
+        check_reply(
+            || "Failed to select raw key/button events",
+            xcb_connection.xinput_xi_select_events(
+                root,
+                &[xinput::EventMask {
+                    deviceid: XINPUT_ALL_DEVICE_GROUPS,
+                    mask: vec![raw_edge_mask()],
+                }],
+            ),
+        )
+        .log_err();
         let compositor_present = check_compositor_present(&xcb_connection, root);
         let gtk_frame_extents_supported =
             check_gtk_frame_extents_supported(&xcb_connection, &atoms, root);
@@ -550,6 +567,8 @@ impl X11Client {
             cursor_styles: HashMap::default(),
             cursor_cache: HashMap::default(),
             cursor_hidden_window: None,
+            pointer_locked: false,
+            locked_window: None,
             invisible_cursor_cache: None,
 
             pointer_device_states,
@@ -1291,6 +1310,48 @@ impl X11Client {
                     }
                 }
             }
+            Event::XinputRawKeyPress(event) | Event::XinputRawKeyRelease(event) => {
+                let pressed = event.event_type == xinput::RAW_KEY_PRESS_EVENT;
+                let (window, modifiers) = {
+                    let state = self.0.borrow();
+                    (state.keyboard_focused_window, state.modifiers)
+                };
+                let window = self.get_window(window?)?;
+                window.handle_input(PlatformInput::RawKey(RawKeyEvent {
+                    scancode: event.detail.saturating_sub(8),
+                    pressed,
+                    modifiers,
+                    timestamp: Duration::from_millis(u64::from(event.time)),
+                }));
+            }
+            Event::XinputRawButtonPress(event) | Event::XinputRawButtonRelease(event) => {
+                let button = raw_button_to_gpui(event.detail)?;
+                let pressed = event.event_type == xinput::RAW_BUTTON_PRESS_EVENT;
+                let window = {
+                    let state = self.0.borrow();
+                    state.mouse_focused_window.or(state.keyboard_focused_window)
+                };
+                let window = self.get_window(window?)?;
+                window.handle_input(PlatformInput::RawButton(RawButtonEvent {
+                    button,
+                    pressed,
+                    timestamp: Duration::from_millis(u64::from(event.time)),
+                }));
+            }
+            Event::XinputRawMotion(event) => {
+                let (window, modifiers) = {
+                    let state = self.0.borrow();
+                    let window = state.pointer_locked.then_some(state.locked_window).flatten();
+                    (window, state.modifiers)
+                };
+                let window = self.get_window(window?)?;
+                let (dx, dy) = raw_motion_xy(&event);
+                window.handle_input(PlatformInput::RelativeMotion(gpui::RelativeMotionEvent {
+                    delta: point(dx, dy),
+                    modifiers,
+                    timestamp: Duration::from_millis(u64::from(event.time)),
+                }));
+            }
             Event::XinputEnter(event) if event.mode == xinput::NotifyMode::NORMAL => {
                 let window = self.get_window(event.event)?;
                 window.set_hovered(true);
@@ -1707,6 +1768,14 @@ impl LinuxClient for X11Client {
         self.0.borrow_mut().hide_cursor_until_mouse_moves();
     }
 
+    fn set_pointer_locked(&self, locked: bool) -> Result<(), PointerLockError> {
+        self.0.borrow_mut().set_pointer_locked(locked)
+    }
+
+    fn is_pointer_locked(&self) -> bool {
+        self.0.borrow().pointer_locked
+    }
+
     fn is_cursor_visible(&self) -> bool {
         self.0.borrow().cursor_hidden_window.is_none()
     }
@@ -2081,6 +2150,77 @@ impl X11ClientState {
         Some(cursor)
     }
 
+    fn set_pointer_locked(&mut self, locked: bool) -> Result<(), PointerLockError> {
+        let root = self.xcb_connection.setup().roots[self.x_root_index].root;
+        if !locked {
+            if !self.pointer_locked {
+                return Ok(());
+            }
+            self.pointer_locked = false;
+            self.locked_window = None;
+            self.xcb_connection
+                .ungrab_pointer(x11rb::CURRENT_TIME)
+                .log_err();
+            check_reply(
+                || "Failed to deselect raw motion",
+                self.xcb_connection.xinput_xi_select_events(
+                    root,
+                    &[xinput::EventMask {
+                        deviceid: XINPUT_ALL_DEVICE_GROUPS,
+                        mask: vec![raw_edge_mask()],
+                    }],
+                ),
+            )
+            .log_err();
+            self.xcb_connection.flush().log_err();
+            self.restore_cursor_after_hide();
+            return Ok(());
+        }
+        if self.pointer_locked {
+            return Ok(());
+        }
+        let Some(window) = self.mouse_focused_window else {
+            return Err(PointerLockError::NoFocusedWindow);
+        };
+        let Some(invisible_cursor) = self.get_or_create_invisible_cursor() else {
+            return Err(PointerLockError::Failed);
+        };
+        // Raw (unaccelerated) device deltas keep flowing when the confined cursor
+        // stops at the window edge.
+        check_reply(
+            || "Failed to select raw motion",
+            self.xcb_connection.xinput_xi_select_events(
+                root,
+                &[xinput::EventMask {
+                    deviceid: XINPUT_ALL_DEVICE_GROUPS,
+                    mask: vec![raw_edge_mask() | xinput::XIEventMask::RAW_MOTION],
+                }],
+            ),
+        )
+        .map_err(|_| PointerLockError::Failed)?;
+        let grab = self
+            .xcb_connection
+            .grab_pointer(
+                false,
+                window,
+                EventMask::NO_EVENT,
+                xproto::GrabMode::ASYNC,
+                xproto::GrabMode::ASYNC,
+                window,
+                invisible_cursor,
+                x11rb::CURRENT_TIME,
+            )
+            .ok()
+            .and_then(|cookie| cookie.reply().ok());
+        if !grab.is_some_and(|reply| reply.status == xproto::GrabStatus::SUCCESS) {
+            return Err(PointerLockError::Failed);
+        }
+        self.xcb_connection.flush().log_err();
+        self.pointer_locked = true;
+        self.locked_window = Some(window);
+        Ok(())
+    }
+
     fn hide_cursor_until_mouse_moves(&mut self) {
         if self.cursor_hidden_window.is_some() {
             return;
@@ -2149,6 +2289,45 @@ pub fn mode_refresh_rate(mode: &randr::ModeInfo) -> Duration {
     let micros = 1_000_000_000 / millihertz;
     log::info!("Refreshing every {}ms", micros / 1_000);
     Duration::from_micros(micros)
+}
+
+/// XInput2 raw key and button edges, selected on the root window.
+fn raw_edge_mask() -> xinput::XIEventMask {
+    xinput::XIEventMask::RAW_KEY_PRESS
+        | xinput::XIEventMask::RAW_KEY_RELEASE
+        | xinput::XIEventMask::RAW_BUTTON_PRESS
+        | xinput::XIEventMask::RAW_BUTTON_RELEASE
+}
+
+fn raw_button_to_gpui(detail: u32) -> Option<MouseButton> {
+    Some(match detail {
+        1 => MouseButton::Left,
+        2 => MouseButton::Middle,
+        3 => MouseButton::Right,
+        8 => MouseButton::Navigate(gpui::NavigationDirection::Back),
+        9 => MouseButton::Navigate(gpui::NavigationDirection::Forward),
+        _ => return None,
+    })
+}
+
+/// The x/y (axes 0 and 1) raw device deltas of an XInput2 raw motion event.
+fn raw_motion_xy(event: &xinput::RawMotionEvent) -> (f32, f32) {
+    let mut values = event.axisvalues_raw.iter();
+    let mut xy = [0.0f32; 2];
+    for (word_index, word) in event.valuator_mask.iter().enumerate() {
+        for bit in 0..32usize {
+            if word & (1u32 << bit) == 0 {
+                continue;
+            }
+            let axis = word_index * 32 + bit;
+            if let Some(value) = values.next() {
+                if axis < 2 {
+                    xy[axis] = fp3232_to_f32(*value);
+                }
+            }
+        }
+    }
+    (xy[0], xy[1])
 }
 
 fn fp3232_to_f32(value: xinput::Fp3232) -> f32 {

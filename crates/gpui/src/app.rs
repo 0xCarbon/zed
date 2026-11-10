@@ -717,6 +717,17 @@ pub struct App {
 }
 
 impl App {
+    /// Capture (`true`) or release the pointer for relative motion; see
+    /// [`Platform::set_pointer_locked`].
+    pub fn set_pointer_locked(&self, locked: bool) -> Result<(), crate::PointerLockError> {
+        self.platform.set_pointer_locked(locked)
+    }
+
+    /// Whether the pointer is currently locked.
+    pub fn is_pointer_locked(&self) -> bool {
+        self.platform.is_pointer_locked()
+    }
+
     #[allow(clippy::new_ret_no_self)]
     pub(crate) fn new_app(
         platform: Rc<dyn Platform>,

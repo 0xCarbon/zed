@@ -4643,6 +4643,13 @@ impl Window {
                 self.modifiers = mouse_exited.modifiers;
                 PlatformInput::MouseExited(mouse_exited)
             }
+            PlatformInput::RelativeMotion(motion) => {
+                self.modifiers = motion.modifiers;
+                PlatformInput::RelativeMotion(motion)
+            }
+            // Raw edges only reach listeners; they change no window input state.
+            PlatformInput::RawKey(key) => PlatformInput::RawKey(key),
+            PlatformInput::RawButton(button) => PlatformInput::RawButton(button),
             PlatformInput::ModifiersChanged(modifiers_changed) => {
                 self.modifiers = modifiers_changed.modifiers;
                 self.capslock = modifiers_changed.capslock;
